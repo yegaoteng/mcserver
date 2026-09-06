@@ -1,4 +1,4 @@
-const SERVER_ADDR = 'xfan.rthl.xyz'; // 请确保这里是你的服务器地址
+const SERVER_ADDR = 'xfan.l.cd'; // 请确保这里是你的服务器地址
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Content-Type': 'application/json'
