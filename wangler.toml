@@ -1,0 +1,11 @@
+name = "mcserver-monitor"
+main = "workers.js"
+compatibility_date = "2026-09-06"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "mcserver"
+database_id = "a12f45ad-7fdd-4fc2-a3f3-d8a2cc1e41f6"
+
+[triggers]
+crons = ["* * * * *"]   # 每分钟采集一次（Cloudflare 最短间隔）
