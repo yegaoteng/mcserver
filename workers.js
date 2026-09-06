@@ -1,10 +1,42 @@
-// workers.js —— 纯 JavaScript 版，零类型报错
-// 对应 wrangler.toml 里的 binding = "DB"
+// workers.js —— 带 CORS 跨域 + 实时 MOTD/版本
 
 const SERVER_ADDR = 'xfan.l.cd';
 
-// 查询 MC 服务器状态（调用公开 API）
-async function queryServer() {
+// 统一的 CORS 响应头
+const corsHeaders = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+  'Access-Control-Allow-Headers': 'Content-Type',
+};
+
+// 辅助函数：返回 JSON 响应并带上 CORS 头
+function jsonResponse(data, status = 200) {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: { 'Content-Type': 'application/json', ...corsHeaders },
+  });
+}
+
+// 查询 MC 服务器状态（调用公开 API，返回完整信息）
+async function queryServerFull() {
+  try {
+    const res = await fetch(`https://api.mcstatus.io/v2/status/java/${SERVER_ADDR}`);
+    const data = await res.json();
+    const online = data.online === true;
+    return {
+      online,
+      motd: online ? data.motd : null,
+      version: online ? data.version : null,
+      players: online ? data.players : { online: 0, max: 0 },
+      ping: online ? Number(data.latency?.java || 0) : 0,
+    };
+  } catch (e) {
+    return { online: false, motd: null, version: null, players: { online: 0, max: 0 }, ping: 0 };
+  }
+}
+
+// 简化版查询（仅用于 Cron 写入 D1，减少数据传输量）
+async function queryServerSimple() {
   try {
     const res = await fetch(`https://api.mcstatus.io/v2/status/java/${SERVER_ADDR}`);
     const data = await res.json();
@@ -12,7 +44,7 @@ async function queryServer() {
     return {
       online,
       ping: online ? Number(data.latency?.java || 0) : 0,
-      players: online ? Number(data.players?.online || 0) : 0
+      players: online ? Number(data.players?.online || 0) : 0,
     };
   } catch (e) {
     return { online: false, ping: 0, players: 0 };
@@ -20,10 +52,10 @@ async function queryServer() {
 }
 
 export default {
-  // Cron 触发器：每 1 分钟采集一次（Cloudflare 最短间隔）
+  // Cron 触发器：每 1 分钟采集一次，写入 D1（仅存必要字段）
   async scheduled(controller, env, ctx) {
     ctx.waitUntil((async () => {
-      const s = await queryServer();
+      const s = await queryServerSimple();
       await env.DB.prepare(
         'INSERT INTO metrics (time, online, ping, players) VALUES (?, ?, ?, ?)'
       ).bind(Date.now(), s.online ? 1 : 0, s.ping, s.players).run();
@@ -33,32 +65,28 @@ export default {
 
   // HTTP 请求处理
   async fetch(request, env) {
+    // 处理 OPTIONS 预检请求
+    if (request.method === 'OPTIONS') {
+      return new Response(null, { headers: corsHeaders });
+    }
+
     const url = new URL(request.url);
     const path = url.pathname;
 
-    // GET /status —— 最新状态
+    // GET /status —— 实时查询 mcstatus.io 返回完整状态（含 MOTD、版本）
     if (path === '/status') {
-      const row = await env.DB
-        .prepare('SELECT * FROM metrics ORDER BY time DESC LIMIT 1')
-        .first();
-      if (!row) return Response.json({ online: false });
-      return Response.json({
-        online: row.online === 1,
-        ping: row.ping,
-        players: { online: row.players, max: 20 },
-        motd: { clean: ['小帆的服务器'] },
-        version: { name_clean: '1.21.10' }
-      });
+      const realtime = await queryServerFull();
+      return jsonResponse(realtime);
     }
 
-    // GET /metrics?range=1h|24h|7d|30d
+    // GET /metrics?range=10m|1h|24h|7d|30d —— 从 D1 读取历史数据
     if (path === '/metrics') {
       const rangeMap = {
         '10m': 10 * 60 * 1000,
         '1h': 60 * 60 * 1000,
         '24h': 24 * 60 * 60 * 1000,
         '7d': 7 * 24 * 60 * 60 * 1000,
-        '30d': 30 * 24 * 60 * 60 * 1000
+        '30d': 30 * 24 * 60 * 60 * 1000,
       };
       const range = url.searchParams.get('range') || '1h';
       const since = Date.now() - (rangeMap[range] || rangeMap['1h']);
@@ -66,11 +94,11 @@ export default {
         .prepare('SELECT time, online, ping, players FROM metrics WHERE time >= ? ORDER BY time ASC')
         .bind(since)
         .all();
-      return Response.json(results.map(r => ({
+      return jsonResponse(results.map(r => ({
         time: r.time,
         online: r.online === 1,
         ping: r.ping,
-        players: r.players
+        players: r.players,
       })));
     }
 
@@ -86,9 +114,9 @@ export default {
           Number(d.ping) || 0,
           Number(d.players) || 0
         ).run();
-        return Response.json({ ok: true });
+        return jsonResponse({ ok: true });
       } catch (e) {
-        return Response.json({ ok: false, error: e.message }, { status: 400 });
+        return jsonResponse({ ok: false, error: e.message }, 400);
       }
     }
 
@@ -102,9 +130,9 @@ export default {
         players INTEGER NOT NULL
       )`).run();
       await env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_metrics_time ON metrics(time)').run();
-      return Response.json({ ok: true, msg: '表已创建' });
+      return jsonResponse({ ok: true, msg: '表已创建' });
     }
 
-    return new Response('Not Found', { status: 404 });
-  }
+    return new Response('Not Found', { status: 404, headers: corsHeaders });
+  },
 };
