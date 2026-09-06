@@ -1,31 +1,35 @@
-// workers.js —— 完整版：CORS + 实时 MC 状态 + D1 历史数据
+// workers.js —— 修复 ping 为 0 问题（采用 TCP 直连测速）
+import { connect } from 'cloudflare:sockets'; // 引入 Cloudflare TCP 连接 API
 
 const SERVER_ADDR = 'xfan.l.cd';
+const SERVER_PORT = 25565; // Minecraft 默认端口
 
-// 统一的 CORS 响应头
-const corsHeaders = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type',
-};
-
-// 辅助函数：返回 JSON 响应并带上 CORS 头
-function jsonResponse(data, status = 200) {
-  return new Response(JSON.stringify(data), {
-    status,
-    headers: { 'Content-Type': 'application/json', ...corsHeaders },
-  });
+// 1. 使用 TCP 直连测量真实 Ping（毫秒）
+async function measureTcpPing(host, port = SERVER_PORT, timeout = 3000) {
+  const start = Date.now();
+  try {
+    // 建立 TCP 连接（完成三次握手即代表端口通畅）
+    const socket = connect({ hostname: host, port });
+    // 等待连接完全打开
+    await socket.opened;
+    // 关闭连接
+    socket.close();
+    return Date.now() - start;
+  } catch (e) {
+    console.log('[TCP Ping 失败]', e.message);
+    return 0; // 连接失败返回 0
+  }
 }
 
-// 完整查询：用于 /status 实时返回 MOTD、版本、玩家、Ping
-async function queryServerFull() {
+// 2. 查询 MC 服务器状态（获取 MOTD、版本、人数）
+async function queryServerInfo() {
   try {
     const res = await fetch(`https://api.mcstatus.io/v2/status/java/${SERVER_ADDR}`);
     const data = await res.json();
     const online = data.online === true;
-
-    // 正确读取 latency.java，若不存在则返回 0
-    const ping = online ? Number(data.latency?.java ?? 0) : 0;
+    
+    // 如果在线，使用 TCP 直连测真实延迟；否则为 0
+    const ping = online ? await measureTcpPing(SERVER_ADDR) : 0;
 
     return {
       online,
@@ -35,17 +39,11 @@ async function queryServerFull() {
       ping,
     };
   } catch (e) {
-    return {
-      online: false,
-      motd: null,
-      version: null,
-      players: { online: 0, max: 0 },
-      ping: 0,
-    };
+    return { online: false, motd: null, version: null, players: { online: 0, max: 0 }, ping: 0 };
   }
 }
 
-// 简化查询：仅用于 Cron 写入 D1（减少传输量）
+// 简单查询（用于定时采集写入 D1，避免频繁 TCP 连接拖慢定时任务）
 async function queryServerSimple() {
   try {
     const res = await fetch(`https://api.mcstatus.io/v2/status/java/${SERVER_ADDR}`);
@@ -53,16 +51,31 @@ async function queryServerSimple() {
     const online = data.online === true;
     return {
       online,
-      ping: online ? Number(data.latency?.java ?? 0) : 0,
-      players: online ? Number(data.players?.online || 0) : 0,
+      ping: online ? Number(data.latency?.java || 0) : 0,
+      players: online ? Number(data.players?.online || 0) : 0
     };
   } catch (e) {
     return { online: false, ping: 0, players: 0 };
   }
 }
 
+// CORS 跨域头
+const corsHeaders = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type",
+};
+
+// 统一 JSON 响应封装
+function jsonResponse(data, status = 200) {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: { "Content-Type": "application/json", ...corsHeaders }
+  });
+}
+
 export default {
-  // Cron 触发器：每 1 分钟采集一次，写入 D1
+  // Cron 触发器：每 1 分钟采集一次
   async scheduled(controller, env, ctx) {
     ctx.waitUntil((async () => {
       const s = await queryServerSimple();
@@ -83,13 +96,13 @@ export default {
     const url = new URL(request.url);
     const path = url.pathname;
 
-    // GET /status —— 实时查询完整状态
+    // GET /status —— 实时查询完整状态（含 TCP 真实 Ping）
     if (path === '/status') {
-      const realtime = await queryServerFull();
+      const realtime = await queryServerInfo();
       return jsonResponse(realtime);
     }
 
-    // GET /metrics?range=10m|1h|24h|7d|30d —— 从 D1 读取历史数据
+    // GET /metrics?range=10m|1h|24h|7d|30d —— 历史数据
     if (path === '/metrics') {
       const rangeMap = {
         '10m': 10 * 60 * 1000,
@@ -130,7 +143,7 @@ export default {
       }
     }
 
-    // GET /init —— 首次建表（访问一次即可）
+    // GET /init —— 首次建表
     if (path === '/init') {
       await env.DB.prepare(`CREATE TABLE IF NOT EXISTS metrics (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
