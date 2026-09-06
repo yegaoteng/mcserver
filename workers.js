@@ -1,4 +1,4 @@
-const SERVER_ADDR = 'xfan.l.cd'; // 你的服务器地址
+const SERVER_ADDR = 'xfan.l.cd'; // 你的服务器地址，可加 :端口
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -13,90 +13,62 @@ function jsonResponse(data, status = 200) {
   });
 }
 
-// API A：mcstatus.io —— 负责 online / players / motd / version
-async function queryFromMcstatus() {
+// 主查询：使用 minecraftpinger.com（含真实 ping）
+async function queryServerFull() {
   try {
-    const res = await fetch(`https://api.mcstatus.io/v2/status/java/${SERVER_ADDR}`, {
-      headers: { 'User-Agent': 'Minecraft-Monitor' },
+    const res = await fetch(`https://www.minecraftpinger.com/api/v1/${SERVER_ADDR}`, {
+      headers: { 'User-Agent': 'Minecraft-Monitor/1.0' },
     });
-    if (!res.ok) throw new Error('mcstatus.io 请求失败');
     const data = await res.json();
-    if (data.online !== true) return { online: false };
+
+    // 离线或服务不可达时，server 为 null
+    if (!data.server) {
+      return {
+        online: false,
+        motd: null,
+        version: null,
+        players: { online: 0, max: 20 },
+        ping: 0,
+      };
+    }
+
+    const s = data.server;
     return {
       online: true,
-      motd: data.motd || null,
-      version: data.version || null,
+      motd: { clean: [s.motd], raw: [s.motd], html: [s.motd] },
+      version: { name_raw: s.version, name_clean: s.version, protocol: 0 },
       players: {
-        online: Number(data.players?.online || 0),
-        max: Number(data.players?.max || 20),
+        online: Number(s.players.online || 0),
+        max: Number(s.players.max || 20),
       },
+      // ✅ 真正的 ping 毫秒数
+      ping: Number(s.ping || 0),
     };
   } catch (e) {
-    console.error('[API A 失败]', e.message);
-    return null; // 返回 null 表示获取失败
+    console.error('[minecraftpinger 失败]', e.message);
+    return { online: false, motd: null, version: null, players: { online: 0, max: 20 }, ping: 0 };
   }
-}
-
-// API B：mcsrvstat.us —— 专门负责 ping（取它的顶层 ping 字段）
-async function queryPing() {
-  try {
-    const res = await fetch(`https://api.mcsrvstat.us/2/${SERVER_ADDR}`, {
-      headers: { 'User-Agent': 'Minecraft-Monitor' },
-    });
-    if (!res.ok) throw new Error('mcsrvstat.us 请求失败');
-    const data = await res.json();
-    if (data.online !== true) return 0;
-    return Number(data.ping || 0); // 直接返回 ping 数值
-  } catch (e) {
-    console.error('[API B 失败]', e.message);
-    return 0;
-  }
-}
-
-// 合并两个 API 的结果（双 API 互补）
-async function queryServerFull() {
-  // 并发请求两个 API，提高效率
-  const [info, ping] = await Promise.all([
-    queryFromMcstatus(),
-    queryPing(),
-  ]);
-
-  // 如果 API A 完全失败（返回 null），返回离线兜底
-  if (!info) {
-    return {
-      online: false,
-      motd: null,
-      version: null,
-      players: { online: 0, max: 20 },
-      ping: 0,
-    };
-  }
-
-  return {
-    online: info.online,
-    motd: info.online ? info.motd : null,
-    version: info.online ? info.version : null,
-    players: info.players,
-    ping: info.online ? ping : 0, // 只有在线时才记录 ping
-  };
 }
 
 // 简易版（用于 Cron 写入 D1）
 async function queryServerSimple() {
-  const [info, ping] = await Promise.all([
-    queryFromMcstatus(),
-    queryPing(),
-  ]);
-  if (!info || !info.online) return { online: false, ping: 0, players: 0 };
-  return {
-    online: true,
-    ping: ping,
-    players: info.players.online,
-  };
+  try {
+    const res = await fetch(`https://www.minecraftpinger.com/api/v1/${SERVER_ADDR}`, {
+      headers: { 'User-Agent': 'Minecraft-Monitor/1.0' },
+    });
+    const data = await res.json();
+    if (!data.server) return { online: false, ping: 0, players: 0 };
+    return {
+      online: true,
+      ping: Number(data.server.ping || 0),
+      players: Number(data.server.players.online || 0),
+    };
+  } catch (e) {
+    return { online: false, ping: 0, players: 0 };
+  }
 }
 
 export default {
-  // Cron：每分钟采集一次写入 D1
   async scheduled(controller, env, ctx) {
     ctx.waitUntil((async () => {
       const s = await queryServerSimple();
@@ -117,62 +89,41 @@ export default {
     const url = new URL(request.url);
     const path = url.pathname;
 
-    // GET /status —— 实时合并状态
     if (path === '/status') {
       const realtime = await queryServerFull();
       return jsonResponse(realtime);
     }
 
-    // GET /metrics —— 从 D1 读历史
     if (path === '/metrics') {
       const rangeMap = {
-        '10m': 10 * 60 * 1000,
-        '1h': 60 * 60 * 1000,
-        '24h': 24 * 60 * 60 * 1000,
-        '7d': 7 * 24 * 60 * 60 * 1000,
-        '30d': 30 * 24 * 60 * 60 * 1000,
+        '10m': 10 * 60 * 1000, '1h': 60 * 60 * 1000, '24h': 24 * 60 * 60 * 1000,
+        '7d': 7 * 24 * 60 * 60 * 1000, '30d': 30 * 24 * 60 * 60 * 1000,
       };
       const range = url.searchParams.get('range') || '1h';
       const since = Date.now() - (rangeMap[range] || rangeMap['1h']);
       const { results } = await env.DB
         .prepare('SELECT time, online, ping, players FROM metrics WHERE time >= ? ORDER BY time ASC')
-        .bind(since)
-        .all();
+        .bind(since).all();
       return jsonResponse(results.map(r => ({
-        time: r.time,
-        online: r.online === 1,
-        ping: r.ping,
-        players: r.players,
+        time: r.time, online: r.online === 1, ping: r.ping, players: r.players,
       })));
     }
 
-    // POST /collect —— 手动写入（调试用）
     if (path === '/collect' && request.method === 'POST') {
       try {
         const d = await request.json();
-        await env.DB.prepare(
-          'INSERT INTO metrics (time, online, ping, players) VALUES (?, ?, ?, ?)'
-        ).bind(
-          Date.now(),
-          Number(d.online) ? 1 : 0,
-          Number(d.ping) || 0,
-          Number(d.players) || 0
-        ).run();
+        await env.DB.prepare('INSERT INTO metrics (time, online, ping, players) VALUES (?, ?, ?, ?)')
+          .bind(Date.now(), Number(d.online) ? 1 : 0, Number(d.ping) || 0, Number(d.players) || 0).run();
         return jsonResponse({ ok: true });
       } catch (e) {
         return jsonResponse({ ok: false, error: e.message }, 400);
       }
     }
 
-    // GET /init —— 建表
     if (path === '/init') {
       await env.DB.prepare(`CREATE TABLE IF NOT EXISTS metrics (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        time INTEGER NOT NULL,
-        online INTEGER NOT NULL,
-        ping INTEGER NOT NULL,
-        players INTEGER NOT NULL
-      )`).run();
+        id INTEGER PRIMARY KEY AUTOINCREMENT, time INTEGER NOT NULL,
+        online INTEGER NOT NULL, ping INTEGER NOT NULL, players INTEGER NOT NULL)`).run();
       await env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_metrics_time ON metrics(time)').run();
       return jsonResponse({ ok: true, msg: 'D1 表已创建' });
     }
