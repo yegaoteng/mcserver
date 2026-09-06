@@ -1,11 +1,11 @@
-姓名="mcserver-monitor"主要的"mcserver-monitor"
-="workers.js"="workers.js"
-兼容性_日期="2026-09-06"="2026-09-06"
+name = "mcserver-monitor"
+main = "workers.js"
+compatibility_date = "2026-09-06"
 
 [[d1_databases]]
-绑定="DB"="DB"
-数据库名称(_N)="mcserver"="mcserver"
-database_id="a12f45ad-7fdd-4fc2-a3f3-d8a2cc1e41f6"="a12f45ad-7fdd-4fc2-a3f3-d8a2cc1e41f6"
+binding = "DB"
+database_name = "mcserver"
+database_id = "a12f45ad-7fdd-4fc2-a3f3-d8a2cc1e41f6"
 
-[触发器]
-克朗斯=["*****"]#每分钟采集一次(Cloudflare最短间隔）=["*****"]#每分钟采集一次(Cloudflare最短间隔）
+[triggers]
+crons = ["* * * * *"]   # 每分钟采集一次（Cloudflare 最短间隔）
