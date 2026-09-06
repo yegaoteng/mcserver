@@ -1,4 +1,4 @@
-// workers.js —— 带 CORS 跨域 + 实时 MOTD/版本
+// workers.js —— 完整版：CORS + 实时 MC 状态 + D1 历史数据
 
 const SERVER_ADDR = 'xfan.l.cd';
 
@@ -17,25 +17,35 @@ function jsonResponse(data, status = 200) {
   });
 }
 
-// 查询 MC 服务器状态（调用公开 API，返回完整信息）
+// 完整查询：用于 /status 实时返回 MOTD、版本、玩家、Ping
 async function queryServerFull() {
   try {
     const res = await fetch(`https://api.mcstatus.io/v2/status/java/${SERVER_ADDR}`);
     const data = await res.json();
     const online = data.online === true;
+
+    // 正确读取 latency.java，若不存在则返回 0
+    const ping = online ? Number(data.latency?.java ?? 0) : 0;
+
     return {
       online,
       motd: online ? data.motd : null,
       version: online ? data.version : null,
       players: online ? data.players : { online: 0, max: 0 },
-      ping: online ? Number(data.latency?.java || 0) : 0,
+      ping,
     };
   } catch (e) {
-    return { online: false, motd: null, version: null, players: { online: 0, max: 0 }, ping: 0 };
+    return {
+      online: false,
+      motd: null,
+      version: null,
+      players: { online: 0, max: 0 },
+      ping: 0,
+    };
   }
 }
 
-// 简化版查询（仅用于 Cron 写入 D1，减少数据传输量）
+// 简化查询：仅用于 Cron 写入 D1（减少传输量）
 async function queryServerSimple() {
   try {
     const res = await fetch(`https://api.mcstatus.io/v2/status/java/${SERVER_ADDR}`);
@@ -43,7 +53,7 @@ async function queryServerSimple() {
     const online = data.online === true;
     return {
       online,
-      ping: online ? Number(data.latency?.java || 0) : 0,
+      ping: online ? Number(data.latency?.java ?? 0) : 0,
       players: online ? Number(data.players?.online || 0) : 0,
     };
   } catch (e) {
@@ -52,7 +62,7 @@ async function queryServerSimple() {
 }
 
 export default {
-  // Cron 触发器：每 1 分钟采集一次，写入 D1（仅存必要字段）
+  // Cron 触发器：每 1 分钟采集一次，写入 D1
   async scheduled(controller, env, ctx) {
     ctx.waitUntil((async () => {
       const s = await queryServerSimple();
@@ -73,7 +83,7 @@ export default {
     const url = new URL(request.url);
     const path = url.pathname;
 
-    // GET /status —— 实时查询 mcstatus.io 返回完整状态（含 MOTD、版本）
+    // GET /status —— 实时查询完整状态
     if (path === '/status') {
       const realtime = await queryServerFull();
       return jsonResponse(realtime);
